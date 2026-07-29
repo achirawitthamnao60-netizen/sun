@@ -12,7 +12,6 @@ import aiohttp
 import html as html_lib
 import io
 from dotenv import load_dotenv
-from keep_alive import keep_alive
 from datetime import datetime, timedelta, timezone, time as dtime
 from groq import Groq
 
@@ -168,8 +167,6 @@ async def kick_bots_if_no_humans(channel: discord.VoiceChannel):
             except Exception as e:
                 print(f"เตะบอทไม่สำเร็จ ({m}): {e}")
 
-
-keep_alive()
 
 intents = discord.Intents.default()
 intents.message_content = True

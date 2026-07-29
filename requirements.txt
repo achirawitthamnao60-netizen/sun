@@ -1,0 +1,4 @@
+discord.py
+groq
+aiohttp
+python-dotenv

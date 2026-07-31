@@ -193,6 +193,7 @@ bad_words = [
     "กระหรี่",
     "ขี้แพ้",
     "ไร้ค่า",
+    "https://media.discordapp.net/attachments/1449249700292071587/1532771548086272171/image.jpg?ex=6a6e103e&is=6a6cbebe&hm=55ccd69e86700dadf09630e4cba8823afe5890a93ab31fad696d34250f0e1c78&=&format=webp&width=525&height=676",
 ]
 
 single_bad_words = [

@@ -222,6 +222,81 @@ def contains_bad_word(raw_text: str) -> tuple[bool, str | None]:
     return False, None
 
 
+# ===== GAMBLING / BETTING SITE FILTER =====
+# Blocks messages and file attachments that promote or link to online
+# gambling/betting sites (casino, sportsbook, "bonus code", "rakeback",
+# etc. — the kind of content shown in promo screenshots people paste from
+# sites like wesobet.com). Two layers:
+#   1) GAMBLING_DOMAIN_RE — catches known gambling-site URL patterns
+#      (bet/casino/wager/slots domains) wherever they appear in text,
+#      including inside uploaded text files.
+#   2) GAMBLING_PHRASE_RE — catches the promo-page phrasing itself
+#      (e.g. "activate code for bonus", "rakeback", "vip-club", deposit/
+#      withdraw bonus language) so a pasted screenshot transcript or copied
+#      page text gets caught even without a raw URL.
+GAMBLING_DOMAIN_RE = re.compile(
+    r"(https?://)?(www\.)?[a-z0-9-]*(bet|casino|slot|wager|poker|jackpot)[a-z0-9-]*\.(com|net|io|bet|casino|xyz|vip)\b",
+    re.IGNORECASE,
+)
+
+GAMBLING_PHRASE_RE = re.compile(
+    r"(activate\s+code\s+for\s+bonus|rakeback|vip[\s-]?club|promo\s*code|"
+    r"deposit\s+bonus|withdraw(al)?\s+bonus|free\s*spins?|exclusive\s+reward"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def contains_gambling_content(text: str) -> tuple[bool, str | None]:
+    """Return (matched, reason) if `text` looks like it's promoting/linking a
+    gambling or betting site. Used for both message content and the text
+    content of file attachments."""
+    if not text:
+        return False, None
+    m = GAMBLING_DOMAIN_RE.search(text)
+    if m:
+        return True, m.group(0)
+    m = GAMBLING_PHRASE_RE.search(text)
+    if m:
+        return True, m.group(0)
+    return False, None
+
+
+# File extensions we're willing to download and scan the text content of.
+# (Anything not on this list — images, videos, zips, exe, etc. — is not
+# text-scanned here; only its filename/URL is checked via the domain regex.)
+GAMBLING_SCAN_TEXT_EXTS = (
+    ".txt", ".md", ".csv", ".json", ".html", ".htm", ".xml", ".log", ".yaml", ".yml",
+)
+
+
+async def scan_attachments_for_gambling(message: discord.Message) -> tuple[bool, str | None]:
+    """Check a message's attachments for gambling-site content. Checks the
+    filename/URL of every attachment, and additionally downloads and scans
+    the text content of any attachment with a text-like extension. Returns
+    (matched, reason)."""
+    for att in message.attachments:
+        matched, reason = contains_gambling_content(att.filename)
+        if matched:
+            return True, reason
+        matched, reason = contains_gambling_content(att.url)
+        if matched:
+            return True, reason
+
+        fname = att.filename.lower()
+        if fname.endswith(GAMBLING_SCAN_TEXT_EXTS):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(att.url) as r:
+                        file_text = await r.text()
+            except Exception:
+                continue
+            matched, reason = contains_gambling_content(file_text)
+            if matched:
+                return True, reason
+    return False, None
+
+
 # ===== LANGUAGE DETECTION (สำหรับตอน @ บอทนอกห้อง AI) =====
 # Thai script lives in the U+0E00–U+0E7F unicode block, so a simple presence
 # check is enough to tell "user typed Thai" from "user typed English/other"
@@ -1362,6 +1437,41 @@ async def on_message(message):
                 )
         return
 
+    # ===== GAMBLING / BETTING CONTENT FILTER =====
+    # Checks (a) the raw message text for gambling-site URLs / promo phrasing,
+    # and (b) any attached files — including downloading and scanning text-
+    # based attachments (.txt/.md/.html/.json/etc.) for the same patterns.
+    # This is what catches someone pasting a gambling-site link/promo text
+    # in the message itself, or uploading a file whose contents describe a
+    # gambling/betting site (bonus codes, rakeback, VIP club, etc.).
+    gamb_matched, gamb_reason = contains_gambling_content(raw)
+    if not gamb_matched and message.attachments:
+        gamb_matched, gamb_reason = await scan_attachments_for_gambling(message)
+
+    if gamb_matched:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        log_violation(
+            "gambling_content", message.author, message.channel,
+            f"matched: {gamb_reason} | original: {message.content}",
+        )
+        if not message.author.bot:
+            await message.channel.send(
+                f"{message.author.mention} ไม่อนุญาตให้ส่งลิงก์/ไฟล์ที่เกี่ยวกับเว็บพนันหรือเว็บเดิมพัน",
+                delete_after=5,
+            )
+        if LOG_CHANNEL_ID:
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
+            if log_channel:
+                await log_channel.send(
+                    f"🎰 Gambling Content\n"
+                    f"{'🤖' if message.author.bot else '👤'} {message.author.mention}\n"
+                    f"🔎 ตรวจพบ: `{gamb_reason}`"
+                )
+        return
+
     if message.channel.id in AI_CHANNELS and not message.author.bot:
         ai_lang = AI_CHANNELS[message.channel.id]
         await handle_ai_reply(message, ai_lang)
@@ -1449,6 +1559,32 @@ async def on_message_edit(before, after):
             if log_channel:
                 await log_channel.send(
                     f"🚫 คำหยาบ (แก้ไขข้อความ)\n👤 {after.author.mention}\n💬 {after.content}"
+                )
+        return
+
+    # Same catch-up as above for the gambling/betting filter: someone could
+    # post a clean message and then edit a gambling link/promo text in.
+    gamb_matched, gamb_reason = contains_gambling_content(after.content or "")
+    if not gamb_matched and after.attachments:
+        gamb_matched, gamb_reason = await scan_attachments_for_gambling(after)
+    if gamb_matched:
+        try:
+            await after.delete()
+        except Exception:
+            pass
+        log_violation(
+            "gambling_content_edit", after.author, after.channel,
+            f"matched: {gamb_reason} | original: {after.content}",
+        )
+        await after.channel.send(
+            f"{after.author.mention} ไม่อนุญาตให้ส่งลิงก์/ไฟล์ที่เกี่ยวกับเว็บพนันหรือเว็บเดิมพัน",
+            delete_after=5,
+        )
+        if LOG_CHANNEL_ID:
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
+            if log_channel:
+                await log_channel.send(
+                    f"🎰 Gambling Content (แก้ไขข้อความ)\n👤 {after.author.mention}\n🔎 ตรวจพบ: `{gamb_reason}`"
                 )
 
 
